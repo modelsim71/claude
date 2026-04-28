@@ -1,0 +1,23 @@
+# Claude 临时文件
+.claude/sessions/
+.claude/history.jsonl
+.claude/telemetry/
+.claude/backups/
+*.local.json
+
+# 缓存
+.cache/
+node_modules/
+
+# 备份文件
+backups/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
