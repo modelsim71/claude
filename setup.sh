@@ -1,32 +1,92 @@
 #!/bin/bash
-# 确保用 bash 运行，避免 sh/dash 执行时报 Bad substitution
+# ensure bash is used to avoid "Bad substitution" error with sh/dash
 if [ -z "$BASH_VERSION" ]; then
     exec bash "$0" "$@"
 fi
 set -e
 
-echo "=== Claude 项目初始化 ==="
+echo "=== Claude Project Initialization ==="
 
-# 获取脚本所在目录
+# get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 1. 选择安装范围
-echo ""
-echo "请选择安装范围："
-echo "  1) global  - 只安装全局配置和插件"
-echo "  2) project - 只安装项目配置和插件"
-echo "  3) all     - 全部安装"
-read -p "请选择 [1/2/3]: " SCOPE
+# Pre-install: check and install dependencies
+preinstall() {
+    echo ""
+    echo "=== Pre-install: checking dependencies ==="
 
-# 2. 项目配置（如果选了 project 或 all）
+    command_exists() {
+        command -v "$1" &>/dev/null
+    }
+
+    # 1. Check Node.js/npm, install via nvm if missing
+    if ! command_exists node || ! command_exists npm; then
+        echo "  -> Node.js/npm not found, installing via nvm..."
+        curl -fsSL https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh | bash
+
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+        nvm install --lts
+        nvm use --lts
+        echo "  ✓ Node.js $(node --version) installed"
+    else
+        echo "  ✓ Node.js $(node --version) found"
+    fi
+
+    # 2. Check and install claude
+    if ! command_exists claude; then
+        echo "  -> claude not found, installing..."
+        npm install -g @anthropic-ai/claude-code
+        echo "  ✓ claude installed"
+    else
+        echo "  ✓ claude found"
+    fi
+
+    # 3. Check and install unzip
+    if ! command_exists unzip; then
+        echo "  -> unzip not found, installing..."
+        sudo apt install -y unzip
+        echo "  ✓ unzip installed"
+    else
+        echo "  ✓ unzip found"
+    fi
+
+    # 4. Check and install bun (try curl first, fallback to npm)
+    if ! command_exists bun; then
+        echo "  -> bun not found, installing..."
+        if ! curl -fsSL https://bun.sh/install | bash; then
+            echo "  -> curl install failed, trying npm..."
+            npm install -g bun
+        fi
+        echo "  ✓ bun installed"
+    else
+        echo "  ✓ bun found"
+    fi
+
+    echo "=== Pre-install complete ==="
+}
+
+# Run pre-install
+preinstall
+
+# 1. Scope selection
+echo ""
+echo "Select install scope:"
+echo "  1) global  - install global config and plugins only"
+echo "  2) project - install project config and plugins only"
+echo "  3) all     - install all"
+read -p "Select [1/2/3]: " SCOPE
+
+# 2. Project config (if project or all selected)
 PROJECT_TYPE=""
 PROJECT_DIR=""
 if [[ "$SCOPE" == "2" || "$SCOPE" == "3" ]]; then
     echo ""
-    echo "请选择项目类型："
-    echo "  1) dev  - 开发环境"
-    echo "  2) test - 测试环境（暂不细化）"
-    read -p "请选择 [1/2]: " TYPE_CHOICE
+    echo "Select project type:"
+    echo "  1) dev  - development environment"
+    echo "  2) test - test environment"
+    read -p "Select [1/2]: " TYPE_CHOICE
 
     case $TYPE_CHOICE in
         1) PROJECT_TYPE="dev" ;;
@@ -34,44 +94,90 @@ if [[ "$SCOPE" == "2" || "$SCOPE" == "3" ]]; then
         *) PROJECT_TYPE="dev" ;;
     esac
 
-    read -p "请输入项目目录路径 [默认: $(pwd)]: " INPUT_DIR
+    read -p "Enter project directory [default: $(pwd)]: " INPUT_DIR
     PROJECT_DIR="${INPUT_DIR:-$(pwd)}"
 fi
 
-# 3. 复制配置文件
+# 3. Copy config files
 install_global_config() {
     echo ""
-    echo "正在安装 Global 配置..."
+    echo "Installing Global config..."
+
+    # ensure target directory exists
+    mkdir -p ~/.claude
+
+    # copy CLAUDE.md
     if [[ -f "$SCRIPT_DIR/global/CLAUDE.md" ]]; then
         cp "$SCRIPT_DIR/global/CLAUDE.md" ~/.claude/CLAUDE.md
-        echo "  ✓ 已复制 CLAUDE.md 到 ~/.claude/"
+        echo "  ✓ Copied CLAUDE.md to ~/.claude/"
     fi
+
+    # merge settings.json (preserve user's existing config, especially env)
     if [[ -f "$SCRIPT_DIR/global/settings.json" ]]; then
-        cp "$SCRIPT_DIR/global/settings.json" ~/.claude/settings.json
-        echo "  ✓ 已复制 settings.json 到 ~/.claude/"
+        # ensure jq is available
+        if ! command -v jq &>/dev/null; then
+            echo "  -> Installing jq (required for JSON merge)..."
+            sudo apt-get install -y jq 2>/dev/null || {
+                echo "  ⚠ Cannot install jq, falling back to cp (user env config will be lost)"
+                cp "$SCRIPT_DIR/global/settings.json" ~/.claude/settings.json
+                echo "  ✓ Copied settings.json to ~/.claude/ (user config NOT preserved)"
+                return
+            }
+        fi
+
+        if [[ ! -f ~/.claude/settings.json ]]; then
+            # no existing settings, just copy
+            cp "$SCRIPT_DIR/global/settings.json" ~/.claude/settings.json
+            echo "  ✓ Copied settings.json to ~/.claude/"
+        else
+            # merge with jq: user config takes priority, arrays are deduped
+            jq -s '
+                .[0] as $global | .[1] as $user |
+                $global * {
+                    permissions: {
+                        allow: (($global.permissions.allow // []) + ($user.permissions.allow // []) | unique)
+                    },
+                    enabledPlugins: ($user.enabledPlugins // {}),
+                    extraKnownMarketplaces: ($user.extraKnownMarketplaces // {}),
+                    env: ($user.env // $global.env)
+                }
+            ' "$SCRIPT_DIR/global/settings.json" ~/.claude/settings.json > ~/.claude/settings.json.tmp
+
+            if [[ $? -eq 0 ]]; then
+                mv ~/.claude/settings.json.tmp ~/.claude/settings.json
+                echo "  ✓ Merged settings.json to ~/.claude/ (user env preserved)"
+            else
+                rm -f ~/.claude/settings.json.tmp
+                cp "$SCRIPT_DIR/global/settings.json" ~/.claude/settings.json
+                echo "  ⚠ jq merge failed, overwritten settings.json"
+            fi
+        fi
     fi
+
+    # copy custom skills
     if [[ -d "$SCRIPT_DIR/global/skills" ]]; then
         mkdir -p ~/.claude/skills
         cp -r "$SCRIPT_DIR/global/skills/"* ~/.claude/skills/ 2>/dev/null || true
-        echo "  ✓ 已复制自定义 skills 到 ~/.claude/skills/"
+        echo "  ✓ Copied custom skills to ~/.claude/skills/"
     fi
-    echo "Global 配置安装完成"
+
+    echo "Global config installed"
 }
 
 install_project_config() {
     echo ""
-    echo "正在安装 Project 配置（类型: $PROJECT_TYPE）..."
+    echo "Installing Project config (type: $PROJECT_TYPE)..."
     mkdir -p "$PROJECT_DIR/.claude"
 
     if [[ -f "$SCRIPT_DIR/project-configs/$PROJECT_TYPE/CLAUDE.md" ]]; then
         cp "$SCRIPT_DIR/project-configs/$PROJECT_TYPE/CLAUDE.md" "$PROJECT_DIR/CLAUDE.md"
-        echo "  ✓ 已复制 CLAUDE.md 到 $PROJECT_DIR/"
+        echo "  ✓ Copied CLAUDE.md to $PROJECT_DIR/"
     fi
     if [[ -f "$SCRIPT_DIR/project-configs/$PROJECT_TYPE/.claude/settings.json" ]]; then
         cp "$SCRIPT_DIR/project-configs/$PROJECT_TYPE/.claude/settings.json" "$PROJECT_DIR/.claude/settings.json"
-        echo "  ✓ 已复制 settings.json 到 $PROJECT_DIR/.claude/"
+        echo "  ✓ Copied settings.json to $PROJECT_DIR/.claude/"
     fi
-    echo "Project 配置安装完成"
+    echo "Project config installed"
 }
 
 case $SCOPE in
@@ -80,11 +186,11 @@ case $SCOPE in
     3) install_global_config; install_project_config ;;
 esac
 
-# 4. 安装 skills
+# 4. Install skills
 echo ""
-echo "=== 安装 Skills ==="
+echo "=== Installing Skills ==="
 
-# 预定义的 Global Skills（15个）
+# Predefined Global Skills (15)
 GLOBAL_SKILLS=(
     "code-review@claude-plugins-official"
     "security-guidance@claude-plugins-official"
@@ -102,9 +208,9 @@ GLOBAL_SKILLS=(
     "claude-md-management@claude-plugins-official"
 )
 
-# 4.1 显示预配置的 skills
+# 4.1 Show preset skills
 echo ""
-echo "预配置的 Global Skills（15个）："
+echo "Preset Global Skills (15):"
 echo "  1) code-review"
 echo "  2) security-guidance"
 echo "  3) code-simplifier"
@@ -121,67 +227,67 @@ echo "  13) feature-dev"
 echo "  14) claude-md-management"
 echo "  15) find-skills (npx)"
 
-read -p "是否安装预配置的 skills？[Y/n]: " INSTALL_PRESET
+read -p "Install preset skills? [Y/n]: " INSTALL_PRESET
 INSTALL_PRESET=${INSTALL_PRESET:-Y}
 
-# 4.2 安装函数
+# 4.2 Plugin install function
 install_plugin() {
     local plugin="$1"
-    echo "  正在安装 $plugin..."
+    echo "  Installing $plugin..."
 
-    # 特殊处理 claude-hud
+    # Special handling for claude-hud
     if [[ "$plugin" == "claude-hud" ]]; then
         claude plugin marketplace add jarrodwatts/claude-hud 2>/dev/null || true
-        claude plugin install claude-hud 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ 跳过 $plugin（可能已安装或不存在）"
+        claude plugin install claude-hud 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped (already installed or not found)"
         return
     fi
 
-    # 特殊处理 claude-mem
+    # Special handling for claude-mem
     if [[ "$plugin" == "claude-mem" ]]; then
         claude plugin marketplace add thedotmack/claude-mem 2>/dev/null || true
-        claude plugin install claude-mem 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ 跳过 $plugin（可能已安装或不存在）"
+        claude plugin install claude-mem 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped (already installed or not found)"
         return
     fi
 
-    # 特殊处理 find-skills
+    # Special handling for find-skills
     if [[ "$plugin" == "find-skills" ]]; then
-        npx skills add vercel-labs/skills@find-skills -g -y 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ 跳过 $plugin"
+        npx skills add vercel-labs/skills@find-skills -g -y 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped"
         return
     fi
 
-    # 普通插件
-    claude plugin install "$plugin" 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ 跳过 $plugin（可能已安装或不存在）"
+    # Regular plugin
+    claude plugin install "$plugin" 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped (already installed or not found)"
 }
 
-# 4.3 安装预配置 skills
+# 4.3 Install preset skills
 if [[ "$INSTALL_PRESET" =~ ^[Yy]$ ]]; then
     echo ""
-    echo "正在安装预配置的 Global Skills..."
+    echo "Installing preset Global Skills..."
     for skill in "${GLOBAL_SKILLS[@]}"; do
         (cd ~ && install_plugin "$skill")
     done
 fi
 
-# 4.4 获取热门 skills，过滤已预配置和已安装的，交互式选择
+# 4.4 Get popular skills, filter preset and installed, interactive selection
 echo ""
-echo "=== 热门 Skills（前 15 个）==="
+echo "=== Popular Skills (top 15) ==="
 
 if [[ ! -f ~/.claude/plugins/install-counts-cache.json ]]; then
-    echo "  (install-counts-cache.json 不存在，跳过热门列表)"
+    echo "  (install-counts-cache.json not found, skipping popular list)"
 else
-    # 获取已安装的插件列表
+    # Get installed plugins list
     installed_plugins=""
     if command -v claude &>/dev/null; then
         installed_plugins=$(claude plugin list 2>/dev/null | grep -E '^[a-zA-Z0-9@._-]+$' || true)
     fi
 
-    # 构建可选列表（过滤预配置 + 已安装）
+    # Build available list (filter preset + installed)
     AVAILABLE_POPULAR=()
     while IFS= read -r plugin; do
         [[ -z "$plugin" ]] && continue
         plugin_name=$(echo "$plugin" | cut -d'@' -f1)
 
-        # 检查是否预配置
+        # Check if preset
         is_preset=false
         for preset in "${GLOBAL_SKILLS[@]}"; do
             preset_name=$(echo "$preset" | cut -d'@' -f1)
@@ -192,7 +298,7 @@ else
         done
         [[ "$is_preset" == "true" ]] && continue
 
-        # 检查是否已安装
+        # Check if already installed
         if echo "$installed_plugins" | grep -q "^${plugin}$"; then
             continue
         fi
@@ -201,22 +307,22 @@ else
     done < <(jq -r '.counts[:15] | .[] | .plugin' ~/.claude/plugins/install-counts-cache.json 2>/dev/null)
 
     if [[ ${#AVAILABLE_POPULAR[@]} -eq 0 ]]; then
-        echo "  没有可安装的热门 Skills（已全部安装或预配置）"
+        echo "  No popular skills available (all installed or preset)"
     else
-        echo "可安装的热门 Skills（已过滤预配置和已安装的）："
+        echo "Available popular skills (filtered: preset and installed excluded):"
         for i in "${!AVAILABLE_POPULAR[@]}"; do
             p="${AVAILABLE_POPULAR[$i]}"
             installs=$(jq -r --arg x "$p" '.counts[] | select(.plugin == $x) | .unique_installs' ~/.claude/plugins/install-counts-cache.json 2>/dev/null)
-            printf "  %2d) %s - %s 次安装\n" "$((i+1))" "$p" "$installs"
+            printf "  %2d) %s - %s installs\n" "$((i+1))" "$p" "$installs"
         done
 
         echo ""
-        echo "请选择要安装的（可多选）："
-        echo "  - 输入编号安装单个，如: 1"
-        echo "  - 输入多个编号用逗号分隔，如: 1,3,5"
-        echo "  - 输入 'all' 安装全部"
-        echo "  - 输入 'skip' 跳过"
-        read -p "请选择: " POPULAR_CHOICE
+        echo "Select skills to install (multiple selections allowed):"
+        echo "  - Enter a single number: 1"
+        echo "  - Enter multiple numbers separated by commas: 1,3,5"
+        echo "  - Enter 'all' to install all"
+        echo "  - Enter 'skip' to skip"
+        read -p "Select: " POPULAR_CHOICE
 
         if [[ "$POPULAR_CHOICE" != "skip" && -n "$POPULAR_CHOICE" ]]; then
             to_install=()
@@ -229,14 +335,14 @@ else
                     if [[ "$c" =~ ^[0-9]+$ ]] && [[ "$c" -ge 1 ]] && [[ "$c" -le ${#AVAILABLE_POPULAR[@]} ]]; then
                         to_install+=("${AVAILABLE_POPULAR[$((c-1))]}")
                     else
-                        echo "  ⚠ 忽略无效选择: $c"
+                        echo "  ⚠ Invalid selection: $c"
                     fi
                 done
             fi
 
             if [[ ${#to_install[@]} -gt 0 ]]; then
                 echo ""
-                echo "正在安装选中的 Skills..."
+                echo "Installing selected skills..."
                 for plugin in "${to_install[@]}"; do
                     (cd ~ && install_plugin "$plugin")
                 done
@@ -246,9 +352,9 @@ else
 fi
 
 echo ""
-echo "=== 初始化完成 ==="
+echo "=== Initialization complete ==="
 echo ""
-echo "提示："
-echo "  - 运行 'claude' 启动 Claude Code"
-echo "  - 使用 '/help' 查看可用技能"
-echo "  - 如需回滚，请运行 'bash destroy.sh'"
+echo "Tips:"
+echo "  - Run 'claude' to start Claude Code"
+echo "  - Use '/help' to view available skills"
+echo "  - To rollback, run 'bash destroy.sh'"
