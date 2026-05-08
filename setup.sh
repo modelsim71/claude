@@ -230,6 +230,18 @@ echo "  15) find-skills (npx)"
 read -p "Install preset skills? [Y/n]: " INSTALL_PRESET
 INSTALL_PRESET=${INSTALL_PRESET:-Y}
 
+# 4.1 Ensure official marketplace is available
+ensure_official_marketplace() {
+    echo ""
+    echo "Checking official marketplace..."
+    if ! claude plugins marketplace list 2>&1 | grep -q "claude-plugins-official"; then
+        echo "  -> Adding claude-plugins-official marketplace..."
+        claude plugins marketplace add anthropics/claude-plugins-official 2>&1 && echo "  ✓ Official marketplace added" || echo "  ⚠ Failed to add official marketplace"
+    else
+        echo "  ✓ Official marketplace already configured"
+    fi
+}
+
 # 4.2 Plugin install function
 install_plugin() {
     local plugin="$1"
@@ -237,32 +249,33 @@ install_plugin() {
 
     # Special handling for claude-hud
     if [[ "$plugin" == "claude-hud" ]]; then
-        claude plugin marketplace add jarrodwatts/claude-hud 2>/dev/null || true
-        claude plugin install claude-hud 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped (already installed or not found)"
+        claude plugins marketplace add jarrodwatts/claude-hud 2>&1 || true
+        claude plugins install claude-hud 2>&1 && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped (already installed or not found)"
         return
     fi
 
     # Special handling for claude-mem
     if [[ "$plugin" == "claude-mem" ]]; then
-        claude plugin marketplace add thedotmack/claude-mem 2>/dev/null || true
-        claude plugin install claude-mem 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped (already installed or not found)"
+        claude plugins marketplace add thedotmack/claude-mem 2>&1 || true
+        claude plugins install claude-mem 2>&1 && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped (already installed or not found)"
         return
     fi
 
     # Special handling for find-skills
     if [[ "$plugin" == "find-skills" ]]; then
-        npx skills add vercel-labs/skills@find-skills -g -y 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped"
+        npx skills add vercel-labs/skills@find-skills -g -y 2>&1 && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped"
         return
     fi
 
-    # Regular plugin
-    claude plugin install "$plugin" 2>/dev/null && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped (already installed or not found)"
+    # Regular plugin (official marketplace plugins)
+    claude plugins install "$plugin" 2>&1 && echo "    ✓ $plugin" || echo "    ⚠ $plugin skipped (already installed or not found)"
 }
 
 # 4.3 Install preset skills
 if [[ "$INSTALL_PRESET" =~ ^[Yy]$ ]]; then
     echo ""
     echo "Installing preset Global Skills..."
+    ensure_official_marketplace
     for skill in "${GLOBAL_SKILLS[@]}"; do
         (cd ~ && install_plugin "$skill")
     done
@@ -343,6 +356,7 @@ else
             if [[ ${#to_install[@]} -gt 0 ]]; then
                 echo ""
                 echo "Installing selected skills..."
+                ensure_official_marketplace
                 for plugin in "${to_install[@]}"; do
                     (cd ~ && install_plugin "$plugin")
                 done
